@@ -1,0 +1,60 @@
+// stlwrite — a mesh to binary STL.
+//
+// A binary file is an 80-byte header, a 32-bit little-endian triangle
+// count, and fifty bytes per triangle: twelve 32-bit little-endian
+// floats and a 16-bit attribute word, which is written as zero.  Every
+// coordinate and normal is rounded to the nearest binary32.
+//
+// The header is free text.  A header that begins with `solid` makes
+// other readers take the file for ASCII, so the writer puts the words
+// `binary ` in front of such a header.  A header longer than 80 bytes is
+// cut at 80.
+
+use std.bytes
+use std.str
+use stlerr
+use stlf32
+use stlmesh
+
+// The mesh as the bytes of a binary STL file under this header text.
+//
+// A value that is not a finite number, or whose magnitude is past
+// 3.4028235e38, cannot be written, and the answer is a fault that names
+// the triangle.
+//
+// ```novo
+// use std.bytes
+// use stlmesh
+// use stlwrite
+//
+// fn main() [io]
+//     match stlwrite.write_binary(stlmesh.from_triangles("t", []), "empty")
+//         Err(e) => println(e.message())
+//         Ok(b)  => println("${bytes.len(b)}")   // 84
+// ```
+pub fn write_binary(m: stlmesh.StlMesh, header: Str) -> Result<Bytes, stlerr.StlFault> []
+    let n = stlmesh.count(m)
+    var out = bytes.zeros(84 + 50 * n)
+    let head = bytes.from_str(header_for(header))
+    out = bytes.copy_into(out, 0, head, 0, bytes.len(head))
+    out = bytes.set_u32_le(out, 80, n)
+    for i in 0..n
+        let base = 84 + 50 * i
+        for k in 0..12
+            let word = stlf32.from_float(m.data[12 * i + k])
+            if word < 0
+                return Err(stlerr.StlNotRepresentable(i))
+            out = bytes.set_u32_le(out, base + 4 * k, word)
+    Ok(out)
+
+// The header text as it is written: kept off `solid`, and at most 80
+// bytes.
+fn header_for(header: Str) -> Str
+    let text = if str.lower(str.slice(str.trim(header), 0, 5)) == "solid"
+        "binary " + header
+    else
+        header
+    if str.len(text) > 80
+        str.slice(text, 0, 80)
+    else
+        text

@@ -1,0 +1,75 @@
+// stlf32 — IEEE 754 binary32 as the four little-endian bytes an STL file
+// stores, and as a `Float`.
+//
+// A binary STL holds every coordinate as a binary32.  A `Float` is a
+// binary64, so every binary32 is a `Float` exactly, and the conversion
+// the other way rounds to the nearest binary32, ties to even.
+
+use std.bits
+use std.float
+use std.math
+
+// The `Float` that is 2 to the power -149: the unit of a binary32's
+// subnormal numbers.
+fn subnormal_unit() -> Float
+    float.from_bits(874 << 52)
+
+// Whether the binary32 with these bits is an infinity or a not-a-number.
+//
+// ```novo
+// use stlf32
+//
+// fn main() [io]
+//     println("${stlf32.is_non_finite(0x7F800000)} ${stlf32.is_non_finite(0x3F800000)}")   // true false
+// ```
+pub fn is_non_finite(bits32: Int) -> Bool []
+    ((bits32 >>> 23) & 255) == 255
+
+// The value of the binary32 with these 32 bits.  The answer is
+// meaningful for a finite number only; an infinity or a not-a-number
+// answers 0.0, and `is_non_finite` tells them apart first.
+//
+// ```novo
+// use stlf32
+//
+// fn main() [io]
+//     println("${stlf32.to_float(0x3FC00000)}")   // 1.5
+// ```
+pub fn to_float(bits32: Int) -> Float []
+    let sign = (bits32 >>> 31) & 1
+    let exp = (bits32 >>> 23) & 255
+    let mant = bits32 & 8388607
+    if exp == 255
+        0.0
+    elif exp == 0
+        let mag = mant as Float * subnormal_unit()
+        if sign == 1
+            -1.0 * mag
+        else
+            mag
+    else
+        float.from_bits((sign << 63) | ((exp + 896) << 52) | (mant << 29))
+
+// The 32 bits of the binary32 nearest to `x`.  A number whose magnitude
+// is past the largest binary32, an infinity and a not-a-number have no
+// such bits: the answer is -1, and the caller refuses them.
+//
+// ```novo
+// use stlf32
+//
+// fn main() [io]
+//     println("${stlf32.from_float(1.5)}")   // 1069547520
+// ```
+pub fn from_float(x: Float) -> Int []
+    let r = x as fp32 as Float
+    if math.is_nan(r) or math.is_inf(r)
+        return -1
+    let b = float.to_bits(r)
+    let sign = (b >>> 63) & 1
+    let exp = (b >>> 52) & 2047
+    if r == 0.0
+        sign << 31
+    elif exp - 1023 >= -126
+        (sign << 31) | ((exp - 896) << 23) | ((b & 4503599627370495) >>> 29)
+    else
+        (sign << 31) | float.to_int(math.abs(r) / subnormal_unit())

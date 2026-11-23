@@ -1,0 +1,257 @@
+// stlread — binary and ASCII STL to a mesh.
+//
+// The two formats.
+//
+// A binary file is an 80-byte header, a 32-bit little-endian triangle
+// count, and then fifty bytes per triangle: twelve 32-bit little-endian
+// floats (the normal, then the three corners) and a 16-bit attribute
+// word.  Nothing follows the last triangle, so the file is exactly
+// `84 + 50 * count` bytes long.
+//
+// An ASCII file is the keywords of the format between white space.
+//
+//   solid <name>
+//     facet normal <nx> <ny> <nz>
+//       outer loop
+//         vertex <x> <y> <z>
+//         vertex <x> <y> <z>
+//         vertex <x> <y> <z>
+//       endloop
+//     endfacet
+//   endsolid <name>
+//
+// A binary file's header may begin with `solid`, and several CAD
+// programs write it so.  The first word therefore does not tell the two
+// formats apart.  The size does: a file whose length is exactly
+// `84 + 50 * count`, for the count in bytes 80 to 83, is binary, and any
+// other file that begins with `solid` is read as ASCII.
+//
+// The attribute word of a binary triangle is not kept.  A binary normal
+// that is not a finite number is read as the zero vector, since a normal
+// is advisory and `stlmesh.normal_of` computes it from the corners; a
+// binary corner that is not finite is a fault.  An ASCII number is a
+// decimal in the form of `1`, `-0.5`, `1.5e-3` or `1E+2`: `nan`, `inf`,
+// a hexadecimal number and a decimal too large for a `Float` are syntax
+// faults.
+
+use std.bytes
+use std.str
+use stlerr
+use stlf32
+use stlmesh
+
+// The size of a binary file's header and count.
+pub const BINARY_HEADER_BYTES = 84
+
+// The size of one triangle in a binary file.
+pub const BINARY_TRIANGLE_BYTES = 50
+
+// The mesh a binary or an ASCII file holds, told apart by size.
+//
+// ```novo
+// use std.bytes
+// use stlread
+// use stlmesh
+//
+// fn main() [io]
+//     let src = bytes.from_str("solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid t\n")
+//     match stlread.read(src)
+//         Err(e) => println(e.message())
+//         Ok(m)  => println("${stlmesh.count(m)} triangle(s) named ${stlmesh.name_of(m)}")   // 1 triangle(s) named t
+// ```
+pub fn read(src: Bytes) -> Result<stlmesh.StlMesh, stlerr.StlFault> []
+    let n = bytes.len(src)
+    if n >= BINARY_HEADER_BYTES
+        let declared = bytes.u32_le_at(src, 80) ?? 0
+        if BINARY_HEADER_BYTES + BINARY_TRIANGLE_BYTES * declared == n
+            return read_binary(src)
+    if begins_with_solid(src)
+        return read_ascii(src)
+    read_binary(src)
+
+// Whether the first word of the input, after white space, is `solid` in
+// any letter case.
+fn begins_with_solid(src: Bytes) -> Bool
+    var i = 0
+    while (bytes.byte_at(src, i) ?? 33) <= 32 and i < bytes.len(src)
+        i += 1
+    bytes.len(src) - i >= 5 and str.lower(bytes.to_str(bytes.slice(src, i, i + 5))) == "solid"
+
+// ── Binary ──────────────────────────────────────────────────────────
+
+// The mesh of a binary file.
+//
+// The file must be `84 + 50 * count` bytes for the count in its header,
+// and every corner must be a finite number.
+//
+// ```novo
+// use std.bytes
+// use stlread
+//
+// fn main() [io]
+//     match stlread.read_binary(bytes.zeros(84))
+//         Err(e) => println(e.message())
+//         Ok(m)  => println("ok")   // ok
+// ```
+pub fn read_binary(src: Bytes) -> Result<stlmesh.StlMesh, stlerr.StlFault> []
+    let n = bytes.len(src)
+    if n < BINARY_HEADER_BYTES
+        return Err(stlerr.StlTooShort(n))
+    let declared = bytes.u32_le_at(src, 80) ?? 0
+    let expected = BINARY_HEADER_BYTES + BINARY_TRIANGLE_BYTES * declared
+    if expected != n
+        return Err(stlerr.StlSizeMismatch(declared, expected, n))
+    var data: [Float] = []
+    for i in 0..declared
+        let base = BINARY_HEADER_BYTES + BINARY_TRIANGLE_BYTES * i
+        for k in 0..12
+            let word = bytes.u32_le_at(src, base + 4 * k) ?? 0
+            if stlf32.is_non_finite(word)
+                if k >= 3
+                    return Err(stlerr.StlNonFinite(i))
+                list.push(data, 0.0)
+            else
+                list.push(data, stlf32.to_float(word))
+    Ok(stlmesh.StlMesh { name: header_text(src), data: data })
+
+// The text of the 80-byte header: up to its first NUL byte, without
+// white space at either end.
+fn header_text(src: Bytes) -> Str
+    let nul = bytes.find_byte_or(bytes.slice(src, 0, 80), 0, 0, 80)
+    str.trim(bytes.to_str(bytes.slice(src, 0, nul)))
+
+// ── ASCII ───────────────────────────────────────────────────────────
+
+// Where the ASCII reader is in its input.
+struct Cursor
+    var pos: Int
+    var line: Int
+
+// One white-space-delimited word: where it lies, and the line it is on.
+// A word with `from == to` is the end of the input.
+@value
+struct Word
+    from: Int
+    to: Int
+    line: Int
+
+// The next word, advancing the cursor past it.
+fn next_word(src: Bytes, var cur: Cursor) -> Word
+    var i = cur.pos
+    var line = cur.line
+    var b = bytes.byte_at(src, i) ?? -1
+    while b >= 0 and b <= 32
+        if b == 10
+            line += 1
+        i += 1
+        b = bytes.byte_at(src, i) ?? -1
+    let start = i
+    while b > 32
+        i += 1
+        b = bytes.byte_at(src, i) ?? -1
+    cur.pos = i
+    cur.line = line
+    Word { from: start, to: i, line: line }
+
+// The word's text, in lower case, or `end of file` for the end.
+fn lowered(src: Bytes, w: Word) -> Str
+    if w.from == w.to
+        "end of file"
+    else
+        str.lower(bytes.to_str(bytes.slice(src, w.from, w.to)))
+
+// The word's text as written, or `end of file` for the end.
+fn shown(src: Bytes, w: Word) -> Str
+    if w.from == w.to
+        "end of file"
+    else
+        bytes.to_str(bytes.slice(src, w.from, w.to))
+
+// Reads one word and checks that it is the keyword.  The answer is the
+// line the keyword is on.
+fn expect(src: Bytes, var cur: Cursor, keyword: Str) -> Result<Int, stlerr.StlFault>
+    let w = next_word(src, var cur)
+    if lowered(src, w) == keyword
+        Ok(w.line)
+    else
+        Err(stlerr.StlSyntax(w.line, "`${keyword}`", shown(src, w)))
+
+// Whether a word's bytes are all among the characters of a decimal
+// number: digits, a sign, a point and an exponent letter.
+fn number_shaped(src: Bytes, w: Word) -> Bool
+    var ok = w.from < w.to
+    for i in w.from..w.to
+        let b = bytes.byte_at(src, i) ?? 0
+        if not (b >= '0' and b <= '9' or b == '+' or b == '-' or b == '.' or b == 'e' or b == 'E')
+            ok = false
+    ok
+
+// Reads one word as a finite number.
+fn read_number(src: Bytes, var cur: Cursor) -> Result<Float, stlerr.StlFault>
+    let w = next_word(src, var cur)
+    if not number_shaped(src, w)
+        return Err(stlerr.StlSyntax(w.line, "a number", shown(src, w)))
+    match str.to_float(shown(src, w))
+        None    => Err(stlerr.StlSyntax(w.line, "a number", shown(src, w)))
+        Some(x) => Ok(x)
+
+// Reads three numbers and appends them to `data`.
+fn read_triple(src: Bytes, var cur: Cursor, var data: [Float]) -> Result<Int, stlerr.StlFault>
+    for k in 0..3
+        let x = read_number(src, var cur)!
+        list.push(data, x)
+    Ok(0)
+
+// The mesh of an ASCII file.
+//
+// Keywords may be in any letter case.  Text after the `endsolid` line is
+// a fault.
+//
+// ```novo
+// use std.bytes
+// use stlread
+//
+// fn main() [io]
+//     match stlread.read_ascii(bytes.from_str("solid x\nendsolid x\n"))
+//         Err(e) => println(e.message())
+//         Ok(m)  => println("ok")   // ok
+// ```
+pub fn read_ascii(src: Bytes) -> Result<stlmesh.StlMesh, stlerr.StlFault> []
+    var cur = Cursor { pos: 0, line: 1 }
+    let _ = expect(src, var cur, "solid")!
+    // The name is the rest of the line after `solid`.
+    let name_end = bytes.find_byte_or(src, 10, cur.pos, bytes.len(src))
+    let name = str.trim(bytes.to_str(bytes.slice(src, cur.pos, name_end)))
+    cur.pos = name_end
+    var data: [Float] = []
+    var done = false
+    while not done
+        let w = next_word(src, var cur)
+        let word = lowered(src, w)
+        if word == "endsolid"
+            done = true
+        elif word == "facet"
+            let _ = read_facet(src, var cur, var data)!
+        else
+            return Err(stlerr.StlSyntax(w.line, "`facet` or `endsolid`", shown(src, w)))
+    // The rest of the `endsolid` line is the name; anything on a later
+    // line is a fault.
+    let rest = bytes.find_byte_or(src, 10, cur.pos, bytes.len(src))
+    cur.pos = rest
+    let tail = next_word(src, var cur)
+    if tail.from != tail.to
+        return Err(stlerr.StlTrailing(tail.line))
+    Ok(stlmesh.StlMesh { name: name, data: data })
+
+// Reads the rest of one facet, after the word `facet`, into `data`.
+fn read_facet(src: Bytes, var cur: Cursor, var data: [Float]) -> Result<Int, stlerr.StlFault>
+    let _ = expect(src, var cur, "normal")!
+    let _ = read_triple(src, var cur, var data)!
+    let _ = expect(src, var cur, "outer")!
+    let _ = expect(src, var cur, "loop")!
+    for c in 0..3
+        let _ = expect(src, var cur, "vertex")!
+        let _ = read_triple(src, var cur, var data)!
+    let _ = expect(src, var cur, "endloop")!
+    let _ = expect(src, var cur, "endfacet")!
+    Ok(0)

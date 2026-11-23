@@ -1,0 +1,30 @@
+[package]
+name        = "stl-nv"
+version     = "0.1.0"
+description = "A reader of binary and ASCII STL, the triangle-mesh format of 3D printing and CAD export, with the bounding box, the surface area and the volume of the mesh, and a writer of binary STL.  A file's format is told by its size, not by its first word, because a binary file's header may begin with `solid`."
+license     = "Apache-2.0"
+
+# `experimental` because no program outside this repository has used the
+# package yet.
+stability   = "experimental"
+
+# `core`: arithmetic over bytes the caller already holds.  Every public
+# function declares `[]`.  The caller reads the file and writes the
+# bytes this package returns.
+layer       = "core"
+
+category    = "data"
+
+tags        = ["stl", "mesh", "3d-printing", "cad", "triangles", "bounding-box", "volume", "stereolithography"]
+repository  = "https://github.com/novolang/stl-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.26.1"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "Reading binary and ASCII STL, measuring a mesh, and writing binary STL"
+
+[dependencies]
+# None.  Every function is arithmetic over `Bytes`, `Str` and `Float`.

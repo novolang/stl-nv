@@ -1,0 +1,57 @@
+// stlerr — what a reader or a writer refuses, and where.
+
+// Why a reader or a writer refused.
+//
+// ```novo
+// use stlerr
+//
+// fn main() [io]
+//     println(stlerr.code_of(StlTooShort(10)))   // too-short
+// ```
+pub enum StlFault
+    // The input is shorter than any STL file: a binary file has at least
+    // 84 bytes, and an ASCII file at least the word `solid`.
+    StlTooShort(len: Int)
+    // A binary file whose header declares `declared` triangles has to be
+    // `expected` bytes long, and it is `actual`.
+    StlSizeMismatch(declared: Int, expected: Int, actual: Int)
+    // A coordinate or a normal of this triangle, counted from 0, is not a
+    // finite number.
+    StlNonFinite(triangle: Int)
+    // An ASCII file broke the grammar at this line, counted from 1: the
+    // reader expected `expected` and found `saw`.
+    StlSyntax(line: Int, expected: Str, saw: Str)
+    // Something other than white space follows the `endsolid` line of an
+    // ASCII file, at this line.
+    StlTrailing(line: Int)
+    // A coordinate of this triangle cannot be written as a 32-bit float:
+    // it is not finite, or its magnitude is past 3.4028235e38.
+    StlNotRepresentable(triangle: Int)
+
+impl Error for StlFault
+    // The one-line report.
+    fn message(self) -> Str
+        match self
+            StlTooShort(n)                 => "${n} bytes are too few for an STL file"
+            StlSizeMismatch(d, e, a)       => "the header declares ${d} triangles, which is ${e} bytes, and the file is ${a}"
+            StlNonFinite(t)                => "triangle ${t} holds a number that is not finite"
+            StlSyntax(line, expected, saw) => "line ${line}: expected ${expected}, found ${saw}"
+            StlTrailing(line)              => "line ${line}: text follows `endsolid`"
+            StlNotRepresentable(t)         => "triangle ${t} holds a coordinate that is not a finite 32-bit float"
+
+// A short stable name for the kind of fault.
+//
+// ```novo
+// use stlerr
+//
+// fn main() [io]
+//     println(stlerr.code_of(StlTrailing(3)))   // trailing
+// ```
+pub fn code_of(f: StlFault) -> Str []
+    match f
+        StlTooShort(_)           => "too-short"
+        StlSizeMismatch(_, _, _) => "size-mismatch"
+        StlNonFinite(_)          => "non-finite"
+        StlSyntax(_, _, _)       => "syntax"
+        StlTrailing(_)           => "trailing"
+        StlNotRepresentable(_)   => "not-representable"

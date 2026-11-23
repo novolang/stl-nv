@@ -1,0 +1,369 @@
+// stl_tests — the readers, the measurements and the writer, over a
+// tetrahedron and a box whose bytes were written by an independent
+// encoder (Python's struct module, little-endian binary32) and whose
+// volume and area were computed apart from this package.
+
+use std.test
+use std.bytes
+use std.str
+use stlerr
+use stlmesh
+use stlread
+use stlwrite
+
+fn hexb(h: Str) -> Bytes
+    bytes.from_hex(h) ?? bytes.zeros(0)
+
+// A tetrahedron with its corner at the origin and legs of 10 along each
+// axis, as binary STL.  Header `tetra`, four triangles, 284 bytes.
+fn tetra_binary() -> Bytes
+    hexb(str.join([
+        "746574726100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        "0000000000000000000000000000000000000000040000000000000000000000000080bf000000000000000000000000000000000000204100000000",
+        "000020410000000000000000000000000000000080bf0000000000000000000000000000000000002041000000000000000000000000000000000000",
+        "20410000000080bf000000000000000000000000000000000000000000000000000000000000204100000000000020410000000000003acd133f3acd",
+        "133f3acd133f0000204100000000000000000000000000002041000000000000000000000000000020410000"],
+    ""))
+
+// The same tetrahedron as ASCII, with keywords in mixed letter case, a
+// name with a space in it, and exponent notation.
+fn tetra_ascii() -> Str
+    str.join([
+        "solid tetra",
+        "  facet normal 0 0 -1",
+        "    outer loop",
+        "      vertex 0 0 0",
+        "      vertex 0 1e1 0",
+        "      vertex 10.0 0 0",
+        "    endloop",
+        "  endfacet",
+        "  FACET NORMAL 0 -1 0",
+        "    OUTER LOOP",
+        "      VERTEX 0 0 0",
+        "      VERTEX 10 0 0",
+        "      VERTEX 0 0 1.0E+1",
+        "    ENDLOOP",
+        "  ENDFACET",
+        "  facet normal -1 0 0",
+        "    outer loop",
+        "      vertex 0 0 0",
+        "      vertex 0 0 10",
+        "      vertex 0 10 0",
+        "    endloop",
+        "  endfacet",
+        "  facet normal 0.57735026 0.57735026 0.57735026",
+        "    outer loop",
+        "      vertex 10 0 0",
+        "      vertex 0 10 0",
+        "      vertex 0 0 10",
+        "    endloop",
+        "  endfacet",
+        "endsolid tetra",
+        ""],
+    "\n")
+
+fn mesh_of(src: Bytes) -> stlmesh.StlMesh
+    match stlread.read(src)
+        Ok(m)  => m
+        Err(e) =>
+            test.fail(e.message())
+            stlmesh.from_triangles("failed", [])
+
+// ── Reading ─────────────────────────────────────────────────────────
+
+@test
+fn test_a_binary_file_is_read_by_its_size()
+    let m = mesh_of(tetra_binary())
+    test.assert_eq(stlmesh.count(m), 4)
+    test.assert_eq(stlmesh.name_of(m), "tetra")
+    let t = stlmesh.triangle(m, 3)
+    test.assert_eq(t.ax, 10.0)
+    test.assert_eq(t.by, 10.0)
+    test.assert_eq(t.cz, 10.0)
+    test.assert_approx(t.nx, 0.57735026, 0.000001)
+    let first = stlmesh.triangle(m, 0)
+    test.assert_eq(first.nz, -1.0)
+    test.assert_eq(first.by, 10.0)
+    test.assert_eq(first.cx, 10.0)
+
+@test
+fn test_an_ascii_file_reads_to_the_same_mesh_as_the_binary_one()
+    let a = mesh_of(bytes.from_str(tetra_ascii()))
+    let b = mesh_of(tetra_binary())
+    test.assert_eq(stlmesh.count(a), 4)
+    test.assert_eq(stlmesh.name_of(a), "tetra")
+    for i in 0..4
+        let x = stlmesh.triangle(a, i)
+        let y = stlmesh.triangle(b, i)
+        test.assert_approx(x.nx, y.nx, 0.000001)
+        test.assert_approx(x.ny, y.ny, 0.000001)
+        test.assert_approx(x.nz, y.nz, 0.000001)
+        test.assert_eq(x.ax, y.ax)
+        test.assert_eq(x.bx, y.bx)
+        test.assert_eq(x.by, y.by)
+        test.assert_eq(x.cz, y.cz)
+
+@test
+fn test_a_binary_header_that_begins_with_solid_does_not_make_the_file_ascii()
+    var raw = tetra_binary()
+    raw = bytes.copy_into(raw, 0, bytes.from_str("solid exported by a CAD program"), 0, 31)
+    let m = mesh_of(raw)
+    test.assert_eq(stlmesh.count(m), 4)
+    test.assert_eq(stlmesh.name_of(m), "solid exported by a CAD program")
+
+@test
+fn test_the_solid_word_may_follow_white_space_and_be_in_any_case()
+    let m = mesh_of(bytes.from_str("\n  SOLID x\nendsolid x\n"))
+    test.assert_eq(stlmesh.count(m), 0)
+    test.assert_eq(stlmesh.name_of(m), "x")
+
+@test
+fn test_an_ascii_solid_may_have_no_name_and_no_facets()
+    let m = mesh_of(bytes.from_str("solid\nendsolid\n"))
+    test.assert_eq(stlmesh.count(m), 0)
+    test.assert_eq(stlmesh.name_of(m), "")
+
+@test
+fn test_a_non_finite_normal_reads_as_zero_and_a_non_finite_corner_is_a_fault()
+    let nan = bytes.from_str("solid x\nfacet normal nan 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid\n")
+    match stlread.read(nan)
+        Ok(_)  => test.fail("`nan` is not a number of the format")
+        Err(e) => test.assert_eq(stlerr.code_of(e), "syntax")
+    var raw = tetra_binary()
+    raw = bytes.set_u32_le(raw, 84, 0x7FC00000)
+    let m = mesh_of(raw)
+    test.assert_eq(stlmesh.triangle(m, 0).nx, 0.0)
+    test.assert_eq(stlmesh.triangle(m, 0).nz, -1.0)
+    var bad = tetra_binary()
+    bad = bytes.set_u32_le(bad, 84 + 50 + 12, 0x7F800000)
+    match stlread.read(bad)
+        Ok(_)  => test.fail("an infinite corner")
+        Err(e) =>
+            test.assert_eq(stlerr.code_of(e), "non-finite")
+            test.assert_eq(e.message(), "triangle 1 holds a number that is not finite")
+
+@test
+fn test_a_non_finite_ascii_corner_is_a_fault_and_a_huge_normal_is_not()
+    match stlread.read(bytes.from_str("solid x\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1e999 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid\n"))
+        Ok(_)  => test.fail("1e999 is not finite")
+        Err(e) => test.assert_eq(stlerr.code_of(e), "syntax")
+
+// ── Measuring ───────────────────────────────────────────────────────
+
+@test
+fn test_the_bounding_box_and_its_extents()
+    let m = mesh_of(tetra_binary())
+    let b = stlmesh.bounds(m)
+    test.assert_eq(b.min_x, 0.0)
+    test.assert_eq(b.min_y, 0.0)
+    test.assert_eq(b.min_z, 0.0)
+    test.assert_eq(b.max_x, 10.0)
+    test.assert_eq(b.max_y, 10.0)
+    test.assert_eq(b.max_z, 10.0)
+    test.assert_eq(stlmesh.width_of(b), 10.0)
+    test.assert_eq(stlmesh.depth_of(b), 10.0)
+    test.assert_eq(stlmesh.height_of(b), 10.0)
+
+@test
+fn test_the_volume_of_a_tetrahedron_is_a_sixth_of_its_box()
+    let m = mesh_of(tetra_binary())
+    test.assert_approx(stlmesh.signed_volume(m), 166.66666666666666, 0.0000001)
+    test.assert_approx(stlmesh.volume(m), 166.66666666666666, 0.0000001)
+
+@test
+fn test_the_area_is_three_right_triangles_and_the_slanted_face()
+    let m = mesh_of(tetra_binary())
+    test.assert_approx(stlmesh.surface_area(m), 236.60254037844388, 0.0001)
+    test.assert_eq(stlmesh.area_of(stlmesh.triangle(m, 0)), 50.0)
+
+@test
+fn test_a_mesh_turned_inside_out_has_a_negative_signed_volume()
+    let m = mesh_of(tetra_binary())
+    var flipped: [StlTriangle] = []
+    for i in 0..stlmesh.count(m)
+        let t = stlmesh.triangle(m, i)
+        list.push(flipped, StlTriangle { nx: t.nx,
+            ny: t.ny,
+            nz: t.nz,
+            ax: t.ax,
+            ay: t.ay,
+            az: t.az,
+            bx: t.cx,
+            by: t.cy,
+            bz: t.cz,
+            cx: t.bx,
+            cy: t.by,
+            cz: t.bz })
+    let f = stlmesh.from_triangles("flipped", flipped)
+    test.assert_approx(stlmesh.signed_volume(f), -166.66666666666666, 0.0000001)
+    test.assert_approx(stlmesh.volume(f), 166.66666666666666, 0.0000001)
+
+@test
+fn test_an_empty_mesh_measures_zero()
+    let m = stlmesh.from_triangles("none", [])
+    test.assert_eq(stlmesh.count(m), 0)
+    test.assert_eq(stlmesh.volume(m), 0.0)
+    test.assert_eq(stlmesh.surface_area(m), 0.0)
+    test.assert_eq(stlmesh.height_of(stlmesh.bounds(m)), 0.0)
+
+@test
+fn test_the_bounds_follow_negative_coordinates_in_every_axis()
+    let t = StlTriangle { nx: 0.0,
+        ny: 0.0,
+        nz: 1.0,
+        ax: -3.0,
+        ay: 5.0,
+        az: 1.0,
+        bx: 4.0,
+        by: -6.0,
+        bz: 2.0,
+        cx: 0.0,
+        cy: 0.0,
+        cz: -7.0 }
+    let u = StlTriangle { nx: 0.0,
+        ny: 0.0,
+        nz: 1.0,
+        ax: 1.0,
+        ay: 1.0,
+        az: 1.0,
+        bx: 9.0,
+        by: 2.0,
+        bz: 3.0,
+        cx: -8.0,
+        cy: 8.0,
+        cz: 4.0 }
+    let b = stlmesh.bounds(stlmesh.from_triangles("n", [t, u]))
+    test.assert_eq(b.min_x, -8.0)
+    test.assert_eq(b.max_x, 9.0)
+    test.assert_eq(b.min_y, -6.0)
+    test.assert_eq(b.max_y, 8.0)
+    test.assert_eq(b.min_z, -7.0)
+    test.assert_eq(b.max_z, 4.0)
+
+@test
+fn test_a_computed_normal_follows_the_corner_order()
+    let m = mesh_of(tetra_binary())
+    let n = stlmesh.with_computed_normals(m)
+    test.assert_approx(stlmesh.triangle(n, 0).nz, -1.0, 0.000001)
+    test.assert_approx(stlmesh.triangle(n, 1).ny, -1.0, 0.000001)
+    test.assert_approx(stlmesh.triangle(n, 3).nx, 0.5773502691896258, 0.000001)
+    let flat = StlTriangle { nx: 1.0,
+        ny: 1.0,
+        nz: 1.0,
+        ax: 0.0,
+        ay: 0.0,
+        az: 0.0,
+        bx: 1.0,
+        by: 1.0,
+        bz: 1.0,
+        cx: 2.0,
+        cy: 2.0,
+        cz: 2.0 }
+    test.assert_eq(stlmesh.normal_of(flat).nx, 0.0)
+    test.assert_eq(stlmesh.normal_of(flat).ax, 0.0)
+    test.assert_eq(stlmesh.normal_of(flat).cz, 2.0)
+
+// ── Writing ─────────────────────────────────────────────────────────
+
+@test
+fn test_a_mesh_read_from_binary_is_written_back_byte_for_byte()
+    let raw = tetra_binary()
+    match stlwrite.write_binary(mesh_of(raw), "tetra")
+        Err(e)  => test.fail(e.message())
+        Ok(out) => test.assert_eq_str(bytes.to_hex(out), bytes.to_hex(raw))
+
+@test
+fn test_a_mesh_read_from_ascii_is_written_as_binary_and_reads_back()
+    let m = mesh_of(bytes.from_str(tetra_ascii()))
+    match stlwrite.write_binary(m, "from ascii")
+        Err(e)  => test.fail(e.message())
+        Ok(out) =>
+            test.assert_eq(bytes.len(out), 284)
+            let back = mesh_of(out)
+            test.assert_eq(stlmesh.name_of(back), "from ascii")
+            test.assert_approx(stlmesh.volume(back), stlmesh.volume(m), 0.0001)
+
+@test
+fn test_a_header_that_would_look_like_ascii_is_prefixed_and_a_long_one_is_cut()
+    match stlwrite.write_binary(stlmesh.from_triangles("x", []), "solid cube")
+        Err(e)  => test.fail(e.message())
+        Ok(out) => test.assert_eq(stlmesh.name_of(mesh_of(out)), "binary solid cube")
+    match stlwrite.write_binary(stlmesh.from_triangles("x", []), "  Solid cube")
+        Err(e)  => test.fail(e.message())
+        Ok(out) => test.assert_eq(stlmesh.name_of(mesh_of(out)), "binary   Solid cube")
+    let long = str.repeat("abcdefghij", 12)
+    match stlwrite.write_binary(stlmesh.from_triangles("x", []), long)
+        Err(e)  => test.fail(e.message())
+        Ok(out) =>
+            test.assert_eq(bytes.len(out), 84)
+            test.assert_eq(stlmesh.name_of(mesh_of(out)), str.slice(long, 0, 80))
+    match stlwrite.write_binary(stlmesh.from_triangles("x", []), "")
+        Err(e)  => test.fail(e.message())
+        Ok(out) => test.assert_eq(bytes.to_hex(out), str.repeat("00", 84))
+
+@test
+fn test_a_coordinate_that_is_not_a_binary32_is_refused_with_its_triangle()
+    let ok = StlTriangle { nx: 0.0,
+        ny: 0.0,
+        nz: 1.0,
+        ax: 0.0,
+        ay: 0.0,
+        az: 0.0,
+        bx: 1.0,
+        by: 0.0,
+        bz: 0.0,
+        cx: 0.0,
+        cy: 1.0,
+        cz: 0.0 }
+    let big = StlTriangle { nx: 0.0,
+        ny: 0.0,
+        nz: 1.0,
+        ax: 0.0,
+        ay: 0.0,
+        az: 0.0,
+        bx: 1.0e39,
+        by: 0.0,
+        bz: 0.0,
+        cx: 0.0,
+        cy: 1.0,
+        cz: 0.0 }
+    match stlwrite.write_binary(stlmesh.from_triangles("x", [ok, big]), "x")
+        Ok(_)  => test.fail("1e39 does not fit a binary32")
+        Err(e) =>
+            test.assert_eq(stlerr.code_of(e), "not-representable")
+            test.assert_eq(e.message(), "triangle 1 holds a coordinate that is not a finite 32-bit float")
+
+@test
+fn test_values_are_rounded_to_the_nearest_binary32_on_the_way_out()
+    let t = StlTriangle { nx: 0.0,
+        ny: 0.0,
+        nz: 1.0,
+        ax: 0.1,
+        ay: -0.0,
+        az: 1.0e-40,
+        bx: 1.0,
+        by: 0.0,
+        bz: 0.0,
+        cx: 0.0,
+        cy: 1.0,
+        cz: 0.0 }
+    match stlwrite.write_binary(stlmesh.from_triangles("x", [t]), "x")
+        Err(e)  => test.fail(e.message())
+        Ok(out) =>
+            test.assert_eq(bytes.u32_le_at(out, 84 + 12) ?? 0, 0x3DCCCCCD)
+            test.assert_eq(bytes.u32_le_at(out, 84 + 16) ?? 0, 0x80000000)
+            test.assert_eq(bytes.u32_le_at(out, 84 + 20) ?? 0, 0x000116C2)
+            let back = mesh_of(out)
+            test.assert_eq(stlmesh.triangle(back, 0).ax, 0.10000000149011612)
+
+@test
+fn test_the_two_readers_can_be_called_directly()
+    match stlread.read_ascii(bytes.from_str(tetra_ascii()))
+        Err(e) => test.fail(e.message())
+        Ok(m)  => test.assert_eq(stlmesh.count(m), 4)
+    match stlread.read_binary(tetra_binary())
+        Err(e) => test.fail(e.message())
+        Ok(m)  => test.assert_eq(stlmesh.count(m), 4)
+    match stlread.read_ascii(tetra_binary())
+        Ok(_)  => test.fail("a binary file is not ASCII")
+        Err(e) => test.assert_eq(stlerr.code_of(e), "syntax")

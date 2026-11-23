@@ -1,0 +1,369 @@
+// stlmesh — a triangle mesh, and the measurements taken over it.
+//
+// An STL file is a list of triangles and nothing else.  Each triangle
+// has three corners and a normal.  There is no shared vertex table, so a
+// corner that three triangles meet at is written three times, and
+// nothing in the format says that two corners are the same point.
+//
+// The mesh holds its triangles as one list of floats, twelve to a
+// triangle: the normal, then the three corners, each as x, y and z.
+// `triangle` reads one back as a `StlTriangle`.
+//
+// The normal is whatever the file said.  STL requires it to be the unit
+// vector that points out of the solid by the right-hand rule on the
+// corner order, and files in the wild often hold zeros or something
+// else.  `normal_of` computes it from the corners.
+//
+// The volume and the area use the corners alone, so they do not depend
+// on the stored normals.
+
+use std.math
+
+// One triangle: its stored normal and its three corners.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     let t = StlTriangle { nx: 0.0, ny: 0.0, nz: 1.0, ax: 0.0, ay: 0.0, az: 0.0, bx: 1.0, by: 0.0, bz: 0.0, cx: 0.0, cy: 1.0, cz: 0.0 }
+//     println("${stlmesh.area_of(t)}")   // 0.5
+// ```
+pub @value
+struct StlTriangle
+    nx: Float
+    ny: Float
+    nz: Float
+    ax: Float
+    ay: Float
+    az: Float
+    bx: Float
+    by: Float
+    bz: Float
+    cx: Float
+    cy: Float
+    cz: Float
+
+// The axis-aligned box that holds every corner of a mesh.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     let b = StlBounds { min_x: 0.0, min_y: 0.0, min_z: 0.0, max_x: 2.0, max_y: 3.0, max_z: 4.0 }
+//     println("${stlmesh.height_of(b)}")   // 4
+// ```
+pub @value
+struct StlBounds
+    min_x: Float
+    min_y: Float
+    min_z: Float
+    max_x: Float
+    max_y: Float
+    max_z: Float
+
+// A mesh: a name and the triangles, twelve floats each.
+//
+// The list is an implementation detail; use the functions of this
+// module.
+pub struct StlMesh
+    name: Str
+    data: [Float]
+
+// A mesh of these triangles under this name.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     let m = stlmesh.from_triangles("empty", [])
+//     println("${stlmesh.count(m)}")   // 0
+// ```
+pub fn from_triangles(name: Str, tris: [StlTriangle]) -> StlMesh []
+    var data: [Float] = []
+    for t in tris
+        list.push(data, t.nx)
+        list.push(data, t.ny)
+        list.push(data, t.nz)
+        list.push(data, t.ax)
+        list.push(data, t.ay)
+        list.push(data, t.az)
+        list.push(data, t.bx)
+        list.push(data, t.by)
+        list.push(data, t.bz)
+        list.push(data, t.cx)
+        list.push(data, t.cy)
+        list.push(data, t.cz)
+    StlMesh { name: name, data: data }
+
+// The mesh's name: the word after `solid` in an ASCII file, or the text
+// of the 80-byte header of a binary one, without its trailing NUL bytes
+// and spaces.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     println(stlmesh.name_of(stlmesh.from_triangles("cube", [])))   // cube
+// ```
+pub fn name_of(m: StlMesh) -> Str []
+    m.name
+
+// How many triangles the mesh has.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     println("${stlmesh.count(stlmesh.from_triangles("x", []))}")   // 0
+// ```
+pub fn count(m: StlMesh) -> Int []
+    list.len(m.data) / 12
+
+// The triangle at index `i`, counted from 0.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     let t = StlTriangle { nx: 0.0, ny: 0.0, nz: 1.0, ax: 0.0, ay: 0.0, az: 0.0, bx: 1.0, by: 0.0, bz: 0.0, cx: 0.0, cy: 1.0, cz: 0.0 }
+//     let m = stlmesh.from_triangles("t", [t])
+//     println("${stlmesh.triangle(m, 0).bx}")   // 1
+// ```
+pub fn triangle(m: StlMesh, i: Int) -> StlTriangle []
+    let k = i * 12
+    StlTriangle { nx: m.data[k],
+        ny: m.data[k + 1],
+        nz: m.data[k + 2],
+        ax: m.data[k + 3],
+        ay: m.data[k + 4],
+        az: m.data[k + 5],
+        bx: m.data[k + 6],
+        by: m.data[k + 7],
+        bz: m.data[k + 8],
+        cx: m.data[k + 9],
+        cy: m.data[k + 10],
+        cz: m.data[k + 11] }
+
+// The unit normal the corner order implies: the cross product of the
+// edges A to B and A to C, divided by its length.  A triangle of no area
+// has no direction, and its normal is the zero vector.
+//
+// The answer is a triangle with its stored normal replaced, so a
+// caller compares `normal_of(t).nx` with `t.nx`.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     let t = StlTriangle { nx: 0.0, ny: 0.0, nz: 0.0, ax: 0.0, ay: 0.0, az: 0.0, bx: 1.0, by: 0.0, bz: 0.0, cx: 0.0, cy: 1.0, cz: 0.0 }
+//     println("${stlmesh.normal_of(t).nz}")   // 1
+// ```
+pub fn normal_of(t: StlTriangle) -> StlTriangle []
+    let ux = t.bx - t.ax
+    let uy = t.by - t.ay
+    let uz = t.bz - t.az
+    let vx = t.cx - t.ax
+    let vy = t.cy - t.ay
+    let vz = t.cz - t.az
+    let x = uy * vz - uz * vy
+    let y = uz * vx - ux * vz
+    let z = ux * vy - uy * vx
+    let len = math.sqrt(x * x + y * y + z * z)
+    if len == 0.0
+        StlTriangle { nx: 0.0,
+            ny: 0.0,
+            nz: 0.0,
+            ax: t.ax,
+            ay: t.ay,
+            az: t.az,
+            bx: t.bx,
+            by: t.by,
+            bz: t.bz,
+            cx: t.cx,
+            cy: t.cy,
+            cz: t.cz }
+    else
+        StlTriangle { nx: x / len,
+            ny: y / len,
+            nz: z / len,
+            ax: t.ax,
+            ay: t.ay,
+            az: t.az,
+            bx: t.bx,
+            by: t.by,
+            bz: t.bz,
+            cx: t.cx,
+            cy: t.cy,
+            cz: t.cz }
+
+// The mesh with every stored normal replaced by the one `normal_of`
+// computes from the corners.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     let t = StlTriangle { nx: 0.0, ny: 0.0, nz: 0.0, ax: 0.0, ay: 0.0, az: 0.0, bx: 1.0, by: 0.0, bz: 0.0, cx: 0.0, cy: 1.0, cz: 0.0 }
+//     let m = stlmesh.with_computed_normals(stlmesh.from_triangles("t", [t]))
+//     println("${stlmesh.triangle(m, 0).nz}")   // 1
+// ```
+pub fn with_computed_normals(m: StlMesh) -> StlMesh []
+    var tris: [StlTriangle] = []
+    for i in 0..count(m)
+        list.push(tris, normal_of(triangle(m, i)))
+    from_triangles(m.name, tris)
+
+// The area of one triangle: half the length of the cross product of two
+// edges.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     let t = StlTriangle { nx: 0.0, ny: 0.0, nz: 1.0, ax: 0.0, ay: 0.0, az: 0.0, bx: 2.0, by: 0.0, bz: 0.0, cx: 0.0, cy: 2.0, cz: 0.0 }
+//     println("${stlmesh.area_of(t)}")   // 2
+// ```
+pub fn area_of(t: StlTriangle) -> Float []
+    let ux = t.bx - t.ax
+    let uy = t.by - t.ay
+    let uz = t.bz - t.az
+    let vx = t.cx - t.ax
+    let vy = t.cy - t.ay
+    let vz = t.cz - t.az
+    let x = uy * vz - uz * vy
+    let y = uz * vx - ux * vz
+    let z = ux * vy - uy * vx
+    math.sqrt(x * x + y * y + z * z) / 2.0
+
+// The bounding box of every corner.  A mesh with no triangle has a box
+// of zeros.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     let b = stlmesh.bounds(stlmesh.from_triangles("none", []))
+//     println("${b.max_x}")   // 0
+// ```
+pub fn bounds(m: StlMesh) -> StlBounds []
+    let n = count(m)
+    if n == 0
+        return StlBounds { min_x: 0.0, min_y: 0.0, min_z: 0.0, max_x: 0.0, max_y: 0.0, max_z: 0.0 }
+    var lo_x = m.data[3]
+    var lo_y = m.data[4]
+    var lo_z = m.data[5]
+    var hi_x = lo_x
+    var hi_y = lo_y
+    var hi_z = lo_z
+    for i in 0..n
+        for c in 0..3
+            let k = i * 12 + 3 + c * 3
+            let x = m.data[k]
+            let y = m.data[k + 1]
+            let z = m.data[k + 2]
+            if x < lo_x
+                lo_x = x
+            if x > hi_x
+                hi_x = x
+            if y < lo_y
+                lo_y = y
+            if y > hi_y
+                hi_y = y
+            if z < lo_z
+                lo_z = z
+            if z > hi_z
+                hi_z = z
+    StlBounds { min_x: lo_x, min_y: lo_y, min_z: lo_z, max_x: hi_x, max_y: hi_y, max_z: hi_z }
+
+// The extent of the box along x.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     let b = StlBounds { min_x: 1.0, min_y: 0.0, min_z: 0.0, max_x: 4.0, max_y: 0.0, max_z: 0.0 }
+//     println("${stlmesh.width_of(b)}")   // 3
+// ```
+pub fn width_of(b: StlBounds) -> Float []
+    b.max_x - b.min_x
+
+// The extent of the box along y.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     let b = StlBounds { min_x: 0.0, min_y: 1.0, min_z: 0.0, max_x: 0.0, max_y: 5.0, max_z: 0.0 }
+//     println("${stlmesh.depth_of(b)}")   // 4
+// ```
+pub fn depth_of(b: StlBounds) -> Float []
+    b.max_y - b.min_y
+
+// The extent of the box along z, which is the height of a part on a
+// printer's bed.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     let b = StlBounds { min_x: 0.0, min_y: 0.0, min_z: 0.0, max_x: 0.0, max_y: 0.0, max_z: 9.5 }
+//     println("${stlmesh.height_of(b)}")   // 9.5
+// ```
+pub fn height_of(b: StlBounds) -> Float []
+    b.max_z - b.min_z
+
+// The signed volume of the solid the mesh encloses.
+//
+// It is the sum over the triangles of the tetrahedron each makes with
+// the origin, `a . (b x c) / 6`.  The result is positive when the
+// corners wind counter-clockwise seen from outside, which is what STL
+// requires, and negative for a mesh turned inside out.  The number means
+// the volume only for a closed mesh with no self-intersection; for an
+// open one it is whatever the sum is.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     println("${stlmesh.signed_volume(stlmesh.from_triangles("none", []))}")   // 0
+// ```
+pub fn signed_volume(m: StlMesh) -> Float []
+    var sum = 0.0
+    for i in 0..count(m)
+        let k = i * 12 + 3
+        let ax = m.data[k]
+        let ay = m.data[k + 1]
+        let az = m.data[k + 2]
+        let bx = m.data[k + 3]
+        let by = m.data[k + 4]
+        let bz = m.data[k + 5]
+        let cx = m.data[k + 6]
+        let cy = m.data[k + 7]
+        let cz = m.data[k + 8]
+        sum += ax * (by * cz - bz * cy) + ay * (bz * cx - bx * cz) + az * (bx * cy - by * cx)
+    sum / 6.0
+
+// The volume of the solid: the magnitude of `signed_volume`.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     println("${stlmesh.volume(stlmesh.from_triangles("none", []))}")   // 0
+// ```
+pub fn volume(m: StlMesh) -> Float []
+    math.abs(signed_volume(m))
+
+// The total area of the triangles.
+//
+// ```novo
+// use stlmesh
+//
+// fn main() [io]
+//     println("${stlmesh.surface_area(stlmesh.from_triangles("none", []))}")   // 0
+// ```
+pub fn surface_area(m: StlMesh) -> Float []
+    var sum = 0.0
+    for i in 0..count(m)
+        sum += area_of(triangle(m, i))
+    sum

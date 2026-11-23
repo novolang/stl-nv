@@ -1,0 +1,170 @@
+// stl_edge_tests — binary32 conversion against known bit patterns, and
+// every refusal of the two readers with the position it names.
+
+use std.test
+use std.bytes
+use std.str
+use std.float
+use stlerr
+use stlf32
+use stlmesh
+use stlread
+
+fn fault_of(src: Bytes) -> Str
+    match stlread.read(src)
+        Ok(_)  => "ok"
+        Err(e) => "${stlerr.code_of(e)}: ${e.message()}"
+
+fn ascii_fault(s: Str) -> Str
+    fault_of(bytes.from_str(s))
+
+// ── binary32 ────────────────────────────────────────────────────────
+
+@test
+fn test_binary32_values_convert_to_the_bits_ieee_754_assigns()
+    test.assert_eq(stlf32.from_float(1.0), 0x3F800000)
+    test.assert_eq(stlf32.from_float(-2.0), 0xC0000000)
+    test.assert_eq(stlf32.from_float(0.1), 0x3DCCCCCD)
+    test.assert_eq(stlf32.from_float(0.0), 0)
+    test.assert_eq(stlf32.from_float(-0.0), 0x80000000)
+    test.assert_eq(stlf32.from_float(3.4028234663852886e38), 0x7F7FFFFF)
+    test.assert_eq(stlf32.from_float(1.1754943508222875e-38), 0x00800000)
+    test.assert_eq(stlf32.from_float(1.401298464324817e-45), 1)
+    test.assert_eq(stlf32.from_float(1.1754942106924411e-38), 0x007FFFFF)
+    test.assert_eq(stlf32.from_float(-1.401298464324817e-45), 0x80000001)
+
+@test
+fn test_binary32_bits_convert_to_the_values_ieee_754_assigns()
+    test.assert_eq(stlf32.to_float(0x3F800000), 1.0)
+    test.assert_eq(stlf32.to_float(0xC0000000), -2.0)
+    test.assert_eq(stlf32.to_float(0x3DCCCCCD), 0.10000000149011612)
+    test.assert_eq(stlf32.to_float(0), 0.0)
+    test.assert_eq(stlf32.to_float(0x7F7FFFFF), 3.4028234663852886e38)
+    test.assert_eq(stlf32.to_float(0x00800000), 1.1754943508222875e-38)
+    test.assert_eq(stlf32.to_float(1), 1.401298464324817e-45)
+    test.assert_eq(stlf32.to_float(0x80000001), -1.401298464324817e-45)
+    test.assert_eq(stlf32.to_float(0x007FFFFF), 1.1754942106924411e-38)
+    test.assert_eq(stlf32.to_float(0x7F800000), 0.0)
+    test.assert_eq(float.to_bits(stlf32.to_float(0x80000000)), -9223372036854775808)
+    test.assert_eq(float.to_bits(stlf32.to_float(0)), 0)
+
+@test
+fn test_infinities_and_not_a_numbers_are_told_apart_and_have_no_bits()
+    test.assert(stlf32.is_non_finite(0x7F800000))
+    test.assert(stlf32.is_non_finite(0xFF800000))
+    test.assert(stlf32.is_non_finite(0x7FC00000))
+    test.assert(not stlf32.is_non_finite(0x7F7FFFFF))
+    test.assert(not stlf32.is_non_finite(0))
+    test.assert_eq(stlf32.from_float(3.5e38), -1)
+    test.assert_eq(stlf32.from_float(-3.5e38), -1)
+    test.assert_eq(stlf32.from_float(1.0e300), -1)
+
+@test
+fn test_rounding_goes_to_the_nearest_binary32_with_ties_to_even()
+    // Halfway between 1.0 and the next binary32 is 1 + 2^-24: ties to
+    // even keeps 1.0.  A hair above it goes up.
+    test.assert_eq(stlf32.from_float(1.0000000596046448), 0x3F800000)
+    test.assert_eq(stlf32.from_float(1.0000000596046450), 0x3F800001)
+    // Halfway between the largest binary32 and 2^128 rounds to infinity.
+    test.assert_eq(stlf32.from_float(3.4028235677973366e38), -1)
+    test.assert_eq(stlf32.from_float(3.4028235677973362e38), 0x7F7FFFFF)
+
+@test
+fn test_every_sampled_finite_pattern_survives_the_round_trip()
+    var bad = 0
+    var checked = 0
+    for i in 0..60000
+        let p = (i * 71597) & 4294967295
+        if not stlf32.is_non_finite(p)
+            checked += 1
+            if stlf32.from_float(stlf32.to_float(p)) != p
+                bad += 1
+    test.assert(checked > 59000)
+    test.assert_eq(bad, 0)
+
+// ── Binary refusals ─────────────────────────────────────────────────
+
+@test
+fn test_a_file_too_short_for_either_format_is_refused_with_its_length()
+    test.assert_eq(fault_of(bytes.zeros(0)), "too-short: 0 bytes are too few for an STL file")
+    test.assert_eq(fault_of(bytes.zeros(83)), "too-short: 83 bytes are too few for an STL file")
+    test.assert_eq(stlerr.code_of(stlerr.StlTooShort(1)), "too-short")
+
+@test
+fn test_a_binary_file_of_the_wrong_size_names_both_sizes()
+    var raw = bytes.zeros(84 + 50)
+    raw = bytes.set_u32_le(raw, 80, 2)
+    test.assert_eq(fault_of(raw),
+        "size-mismatch: the header declares 2 triangles, which is 184 bytes, and the file is 134")
+    var extra = bytes.zeros(84 + 50 + 1)
+    extra = bytes.set_u32_le(extra, 80, 1)
+    test.assert_eq(fault_of(extra),
+        "size-mismatch: the header declares 1 triangles, which is 134 bytes, and the file is 135")
+
+@test
+fn test_a_binary_file_with_no_triangles_is_a_mesh_of_none()
+    match stlread.read(bytes.zeros(84))
+        Err(e) => test.fail(e.message())
+        Ok(m)  => test.assert_eq(stlmesh.count(m), 0)
+
+@test
+fn test_the_exact_binary_reader_does_not_look_at_the_first_word()
+    match stlread.read_binary(bytes.from_str("solid"))
+        Ok(_)  => test.fail("five bytes are not a binary file")
+        Err(e) => test.assert_eq(stlerr.code_of(e), "too-short")
+
+@test
+fn test_a_header_of_eighty_text_bytes_with_no_nul_is_read_whole()
+    var raw = bytes.zeros(84)
+    raw = bytes.copy_into(raw, 0, bytes.from_str(str.repeat("a", 80)), 0, 80)
+    match stlread.read(raw)
+        Err(e) => test.fail(e.message())
+        Ok(m)  => test.assert_eq(str.len(stlmesh.name_of(m)), 80)
+
+// ── ASCII refusals ──────────────────────────────────────────────────
+
+@test
+fn test_text_that_is_neither_format_is_refused()
+    test.assert_eq(ascii_fault("hello"), "too-short: 5 bytes are too few for an STL file")
+    test.assert_eq(ascii_fault(""), "too-short: 0 bytes are too few for an STL file")
+
+@test
+fn test_an_ascii_file_is_refused_at_the_first_word_that_breaks_the_grammar()
+    test.assert_eq(ascii_fault("solid x\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendfacet\nendsolid\n"),
+        "syntax: line 7: expected `endloop`, found endfacet")
+    test.assert_eq(ascii_fault("solid x\nfacet normal 0 0\n"),
+        "syntax: line 3: expected a number, found end of file")
+    test.assert_eq(ascii_fault("solid x\nfacet normal 0 0 z\n"),
+        "syntax: line 2: expected a number, found z")
+    test.assert_eq(ascii_fault("solid x\nfacet 0 0 1\n"),
+        "syntax: line 2: expected `normal`, found 0")
+    test.assert_eq(ascii_fault("solid x\nvertex 1 2 3\n"),
+        "syntax: line 2: expected `facet` or `endsolid`, found vertex")
+    test.assert_eq(ascii_fault("solid x\n"),
+        "syntax: line 2: expected `facet` or `endsolid`, found end of file")
+
+@test
+fn test_a_number_must_be_a_decimal_of_the_format()
+    let head = "solid x\nfacet normal 0 0 1\nouter loop\nvertex "
+    let tail = " 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid\n"
+    test.assert_eq(ascii_fault(head + "0x10" + tail), "syntax: line 4: expected a number, found 0x10")
+    test.assert_eq(ascii_fault(head + "inf" + tail), "syntax: line 4: expected a number, found inf")
+    test.assert_eq(ascii_fault(head + "1e999" + tail), "syntax: line 4: expected a number, found 1e999")
+    test.assert_eq(ascii_fault(head + "1.2.3" + tail), "syntax: line 4: expected a number, found 1.2.3")
+    test.assert_eq(ascii_fault(head + "-1.5E+2" + tail), "ok")
+    test.assert_eq(ascii_fault(head + "+.5" + tail), "ok")
+
+@test
+fn test_text_after_the_endsolid_line_is_a_fault_with_its_line()
+    test.assert_eq(ascii_fault("solid a\nendsolid a\nsolid b\nendsolid b\n"),
+        "trailing: line 3: text follows `endsolid`")
+    test.assert_eq(ascii_fault("solid a\nendsolid a   \n\n\n"), "ok")
+    test.assert_eq(ascii_fault("solid a\nendsolid"), "ok")
+
+@test
+fn test_every_fault_has_a_code_and_a_message()
+    test.assert_eq(stlerr.code_of(stlerr.StlSizeMismatch(1, 2, 3)), "size-mismatch")
+    test.assert_eq(stlerr.code_of(stlerr.StlNonFinite(1)), "non-finite")
+    test.assert_eq(stlerr.code_of(stlerr.StlSyntax(1, "a", "b")), "syntax")
+    test.assert_eq(stlerr.code_of(stlerr.StlTrailing(1)), "trailing")
+    test.assert_eq(stlerr.code_of(stlerr.StlNotRepresentable(1)), "not-representable")
